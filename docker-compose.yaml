@@ -1,0 +1,28 @@
+# You need to run:
+# $ mkdir -p data mnt
+# $ chown -R 65534:65534 data mnt
+# at the first start to create directories with correct permissions
+
+services:
+  zipfs:
+    # build: .
+    image: ghcr.io/wvffle/fuse-zipfs
+    privileged: true
+    volumes:
+      - # Data/source directory
+        source: ./data
+        target: /app/data
+        type: bind
+      - # Mountpoint/target directory
+        source: ./mnt
+        target: /app/mnt
+        type: bind
+        bind:
+          propagation: rshared
+    environment:
+      RUST_LOG: zipfs=debug
+    command:
+      - /app/data
+      - /app/mnt
+      - -o
+      - allow_other
