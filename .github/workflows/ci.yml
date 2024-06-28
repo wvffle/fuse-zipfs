@@ -1,0 +1,39 @@
+name: Lint and test
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Rustfmt, Clippy, Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: fuse3 libfuse3-dev
+
+      - uses: actions-rust-lang/setup-rust-toolchain@main
+
+      - uses: Swatinem/rust-cache@master
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Rustfmt
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy
+
+      - name: Test
+        run: cargo nextest run -j 1

@@ -61,7 +61,7 @@ fn metadata_to_file_attrs(metadata: fs::Metadata) -> Result<FileAttr, FuseError>
 }
 
 pub struct ZipFs {
-    umount: Sender<()>,
+    umount: Option<Sender<()>>,
     open_files: LruCache<FileHandle, ZipArchive<Arc<File>>>,
     tree: FileTree,
 }
@@ -69,12 +69,15 @@ pub struct ZipFs {
 impl Drop for ZipFs {
     fn drop(&mut self) {
         debug!("Drop ZipFs");
-        self.umount.send(()).unwrap();
+
+        if let Some(umount) = &self.umount {
+            umount.send(()).unwrap();
+        }
     }
 }
 
 impl ZipFs {
-    pub fn new(data_dir: PathBuf, cache_size: NonZeroUsize, umount: Sender<()>) -> Self {
+    pub fn new(data_dir: PathBuf, cache_size: NonZeroUsize, umount: Option<Sender<()>>) -> Self {
         Self {
             umount,
             open_files: LruCache::new(cache_size),
@@ -126,15 +129,19 @@ impl ZipFs {
         if let Some((ref zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
             let metadata = fs::metadata(zip_path).map_err(map_io_error)?;
             let mut attrs = metadata_to_file_attrs(metadata)?;
-            let archive = self.open_zip(zip_path)?;
+            attrs.ino = ino;
+
+            let Some(archive) = self.open_zip(zip_path)? else {
+                attrs.kind = FileType::Directory;
+                attrs.perm = 0o555;
+                return Ok(attrs);
+            };
 
             let is_dir = archive
                 .clone()
                 .by_name(file_path.to_string_lossy().as_ref())
                 .map(|entry| entry.is_dir())
                 .unwrap_or(true);
-
-            attrs.ino = ino;
 
             if is_dir {
                 attrs.kind = FileType::Directory;
@@ -153,7 +160,7 @@ impl ZipFs {
         }
     }
 
-    fn open_zip(&mut self, zip_path: &PathBuf) -> Result<ZipArchive<Arc<File>>, FuseError> {
+    fn open_zip(&mut self, zip_path: &PathBuf) -> Result<Option<ZipArchive<Arc<File>>>, FuseError> {
         let Some(ino) = self.tree.find_inode_by_path(zip_path) else {
             // NOTE: Maybe create the inode then?
             error!("inode not found for zip = {:?}", zip_path);
@@ -162,14 +169,22 @@ impl ZipFs {
 
         // Get from cache
         if let Some(archive) = self.open_files.get(&ino) {
-            return Ok(archive.clone());
+            return Ok(Some(archive.clone()));
         }
 
         let file = fs::File::open(zip_path).map_err(map_io_error)?;
-        let archive = ZipArchive::new(Arc::new(file)).map_err(map_io_error)?;
+        let archive = ZipArchive::new(Arc::new(file));
+
+        let archive = match archive {
+            Ok(archive) => archive,
+            Err(err) => {
+                error!("Error opening zip file: {:?}", err);
+                return Ok(None);
+            }
+        };
 
         self.open_files.put(ino, archive.clone());
-        Ok(archive)
+        Ok(Some(archive))
     }
 
     fn readdir_zip(
@@ -185,7 +200,9 @@ impl ZipFs {
             return Ok(());
         }
 
-        let mut archive = self.open_zip(&zip_path.to_path_buf())?;
+        let Some(mut archive) = self.open_zip(&zip_path.to_path_buf())? else {
+            return Ok(());
+        };
 
         let file_string = file_path.to_string_lossy().to_string() + "/";
         let file_string = file_string.strip_prefix('/').unwrap_or(&file_string);
@@ -297,19 +314,20 @@ impl ZipFs {
         let path = self.get_data_path(ino)?;
 
         if let Some((zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
-            let mut archive = self.open_zip(&zip_path.to_path_buf())?;
-            let entry = archive
-                .by_name(file_path.to_string_lossy().as_ref())
-                .map_err(map_io_error)?;
+            if let Some(mut archive) = self.open_zip(&zip_path.to_path_buf())? {
+                let entry = archive
+                    .by_name(file_path.to_string_lossy().as_ref())
+                    .map_err(map_io_error)?;
 
-            let data = entry
-                .bytes()
-                .skip(offset as usize)
-                .take(size as usize)
-                .collect::<std::result::Result<Vec<u8>, _>>()
-                .map_err(map_io_error)?;
+                let data = entry
+                    .bytes()
+                    .skip(offset as usize)
+                    .take(size as usize)
+                    .collect::<std::result::Result<Vec<u8>, _>>()
+                    .map_err(map_io_error)?;
 
-            return Ok(data);
+                return Ok(data);
+            }
         }
 
         let data = fs::read(path)
