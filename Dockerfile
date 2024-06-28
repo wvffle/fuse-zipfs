@@ -8,6 +8,7 @@ ARG         FUSE3_VERSION="3.16.2-r0"
 WORKDIR     /build
 COPY        . .
 
+ENV         CARGO_TERM_COLOR="always"
 RUN         apk add --no-cache \
               fuse3-dev=${FUSE3_VERSION} \
               cargo=${CARGO_VERSION} \

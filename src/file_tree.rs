@@ -24,7 +24,7 @@ impl FileTree {
         let ino = FUSE_ROOT_ID + self.entries.len() as INode;
 
         self.entries.insert(ino, path);
-        return ino;
+        ino
     }
 
     pub fn find_path_by_inode(&self, inode: INode) -> Option<&PathBuf> {

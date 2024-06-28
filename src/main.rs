@@ -2,13 +2,10 @@ use std::num::NonZeroUsize;
 
 use clap::Parser;
 use color_eyre::Result;
-use filesystem::ZipFs;
 use fuser::MountOption;
 use tracing::{debug, info};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-
-mod file_tree;
-mod filesystem;
+use zipfs::ZipFs;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -29,7 +26,7 @@ struct Args {
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let mut args = Args::parse();
+    let args = Args::parse();
 
     let filter = EnvFilter::builder()
         .with_default_directive("zipfs=info".parse()?)
@@ -47,7 +44,7 @@ fn main() -> Result<()> {
     info!("Mount point: {:?}", args.mount_point);
     info!("Cache size: {}", args.cache_size);
     let guard = fuser::spawn_mount2(
-        ZipFs::new(args.data_dir, args.cache_size, tx.clone()),
+        ZipFs::new(args.data_dir, args.cache_size, Some(tx.clone())),
         args.mount_point,
         &get_options(args.mount_options),
     )?;
