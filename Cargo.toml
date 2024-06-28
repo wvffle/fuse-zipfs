@@ -5,12 +5,16 @@ edition = "2021"
 
 [dependencies]
 bimap = "0.6.3"
+bytes = "1.6.0"
 clap = { version = "4.5.7", features = ["derive"] }
 color-eyre = "0.6.3"
 ctrlc = "3.4.4"
-fuser = "0.14.0"
+fuse3 = { version = "0.7.2", features = ["tokio-runtime", "unprivileged"] }
+futures-util = "0.3.30"
 libc = "0.2.155"
 lru = "0.12.3"
+tokio = { version = "1.38.0", default-features = false, features = ["fs", "rt", "sync", "macros", "process"] }
+tokio-stream = { version = "0.1.15", features = ["fs", "sync"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 zip = "2.1.3"

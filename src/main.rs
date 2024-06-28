@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use clap::Parser;
 use color_eyre::Result;
-use fuser::MountOption;
+use fuse3::{path::Session, MountOptions};
 use tracing::{debug, info};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use zipfs::ZipFs;
@@ -23,7 +23,8 @@ struct Args {
     mount_options: String,
 }
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     color_eyre::install()?;
 
     let args = Args::parse();
@@ -37,53 +38,63 @@ fn main() -> Result<()> {
         .with(filter)
         .init();
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    // let (tx, rx) = std::sync::mpsc::channel();
 
     info!("Mounting ZIP file system");
     info!("Data directory: {:?}", args.data_dir);
     info!("Mount point: {:?}", args.mount_point);
     info!("Cache size: {}", args.cache_size);
-    let guard = fuser::spawn_mount2(
-        ZipFs::new(args.data_dir, args.cache_size, Some(tx.clone())),
-        args.mount_point,
-        &get_options(args.mount_options),
-    )?;
 
-    ctrlc::set_handler(move || {
-        debug!("Received signal to unmount");
-        tx.send(()).unwrap();
-    })?;
+    let mut mount_options = MountOptions::default();
+    mount_options
+        .fs_name("zipfs")
+        .read_only(true)
+        .force_readdir_plus(true);
 
-    // NOTE: Drop the guard only after we have received a signal
-    rx.recv()?;
-    drop(guard);
+    Session::new(mount_options)
+        .mount(
+            // ZipFs::new(args.data_dir, args.cache_size, Some(tx.clone())),
+            ZipFs::new(args.data_dir, args.cache_size, None),
+            args.mount_point,
+        )
+        .await?
+        .await?;
+
+    // ctrlc::set_handler(move || {
+    //     debug!("Received signal to unmount");
+    //     tx.send(()).unwrap();
+    // })?;
+
+    // // NOTE: Drop the guard only after we have received a signal
+    // rx.recv()?;
+    // drop(guard);
     info!("Successfully unmounted");
 
     Ok(())
 }
 
-fn get_options(mount_options: String) -> Vec<MountOption> {
-    let mut options = vec![MountOption::RO, MountOption::FSName("zipfs".to_string())];
-
-    for opt in mount_options.split(',') {
-        let opt = match opt {
-            "default_permissions" => MountOption::DefaultPermissions,
-            "allow_other" => MountOption::AllowOther,
-            "allow_root" => MountOption::AllowRoot,
-            "auto_unmount" => MountOption::AutoUnmount,
-            "dev" => MountOption::Dev,
-            "nodev" => MountOption::NoDev,
-            "suid" => MountOption::Suid,
-            "nosuid" => MountOption::NoSuid,
-            "atime" => MountOption::Atime,
-            "noatime" => MountOption::NoAtime,
-            "exec" => MountOption::Exec,
-            "noexec" => MountOption::NoExec,
-            other => MountOption::CUSTOM(other.to_string()),
-        };
-
-        options.push(opt);
-    }
-
-    options
-}
+// fn get_options(mount_options: String) -> Vec<MountOption> {
+//     let mut options = vec![MountOption::RO, MountOption::FSName("zipfs".to_string())];
+//
+//     for opt in mount_options.split(',') {
+//         let opt = match opt {
+//             "default_permissions" => MountOption::DefaultPermissions,
+//             "allow_other" => MountOption::AllowOther,
+//             "allow_root" => MountOption::AllowRoot,
+//             "auto_unmount" => MountOption::AutoUnmount,
+//             "dev" => MountOption::Dev,
+//             "nodev" => MountOption::NoDev,
+//             "suid" => MountOption::Suid,
+//             "nosuid" => MountOption::NoSuid,
+//             "atime" => MountOption::Atime,
+//             "noatime" => MountOption::NoAtime,
+//             "exec" => MountOption::Exec,
+//             "noexec" => MountOption::NoExec,
+//             other => MountOption::CUSTOM(other.to_string()),
+//         };
+//
+//         options.push(opt);
+//     }
+//
+//     options
+// }

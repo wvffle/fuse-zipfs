@@ -1,37 +1,116 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, ffi::OsString, time::SystemTime};
 
-use bimap::BiMap;
-use fuser::FUSE_ROOT_ID;
-
-type INode = u64;
+use bytes::BytesMut;
+use fuse3::{path::reply::FileAttr, FileType, SetAttr};
+use libc::mode_t;
 
 #[derive(Debug)]
-pub struct FileTree {
-    entries: BiMap<INode, PathBuf>,
+enum Entry {
+    Dir(Dir),
+    File(File),
 }
 
-impl FileTree {
-    pub fn new(data_dir: PathBuf) -> Self {
-        let mut tree = Self {
-            entries: BiMap::new(),
-        };
+impl Entry {
+    fn attr(&self) -> FileAttr {
+        match self {
+            Entry::Dir(dir) => FileAttr {
+                size: 0,
+                blocks: 0,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
+                kind: FileType::Directory,
+                perm: fuse3::perm_from_mode_and_kind(FileType::Directory, dir.mode),
+                nlink: 0,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                blksize: 0,
+            },
 
-        tree.add_file(data_dir);
-        tree
+            Entry::File(file) => FileAttr {
+                size: file.content.len() as _,
+                blocks: 0,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
+                kind: FileType::RegularFile,
+                perm: fuse3::perm_from_mode_and_kind(FileType::RegularFile, file.mode),
+                nlink: 0,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                blksize: 0,
+            },
+        }
     }
 
-    pub fn add_file(&mut self, path: PathBuf) -> INode {
-        let ino = FUSE_ROOT_ID + self.entries.len() as INode;
+    fn set_attr(&mut self, set_attr: SetAttr) -> FileAttr {
+        match self {
+            Entry::Dir(dir) => {
+                if let Some(mode) = set_attr.mode {
+                    dir.mode = mode;
+                }
+            }
 
-        self.entries.insert(ino, path);
-        ino
+            Entry::File(file) => {
+                if let Some(size) = set_attr.size {
+                    file.content.truncate(size as _);
+                }
+
+                if let Some(mode) = set_attr.mode {
+                    file.mode = mode;
+                }
+            }
+        }
+
+        self.attr()
     }
 
-    pub fn find_path_by_inode(&self, inode: INode) -> Option<&PathBuf> {
-        self.entries.get_by_left(&inode)
+    fn is_dir(&self) -> bool {
+        matches!(self, Entry::Dir(_))
     }
 
-    pub fn find_inode_by_path(&self, path: &PathBuf) -> Option<INode> {
-        self.entries.get_by_right(path).copied()
+    fn is_file(&self) -> bool {
+        !self.is_dir()
+    }
+
+    fn kind(&self) -> FileType {
+        if self.is_dir() {
+            FileType::Directory
+        } else {
+            FileType::RegularFile
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Dir {
+    pub name: OsString,
+    pub children: BTreeMap<OsString, Entry>,
+    pub mode: mode_t,
+}
+
+#[derive(Debug)]
+pub struct File {
+    pub name: OsString,
+    pub content: BytesMut,
+    pub mode: mode_t,
+}
+
+#[derive(Debug)]
+pub struct InnerFs {
+    pub root: Entry,
+}
+
+impl Default for InnerFs {
+    fn default() -> Self {
+        Self {
+            root: Entry::Dir(Dir {
+                name: OsString::from("/"),
+                children: Default::default(),
+                mode: 0o755,
+            }),
+        }
     }
 }
