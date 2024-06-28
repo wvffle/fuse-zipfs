@@ -15,17 +15,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4.1.7
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
 
-      - uses: awalsh128/cache-apt-pkgs-action@v1.4.2
+      - uses: awalsh128/cache-apt-pkgs-action@a6c3917cc929dd0345bfb2d3feaf9101823370ad # v1.4.2
         with:
           packages: fuse3 libfuse3-dev
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1.9.0
+      - uses: actions-rust-lang/setup-rust-toolchain@1fbea72663f6d4c03efaab13560c8a24cfd2a7cc # v1.9.0
 
-      - uses: Swatinem/rust-cache@v2.7.3
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
 
-      - uses: taiki-e/install-action@v2.41.7
+      - uses: taiki-e/install-action@331a600f1b10a3fed8dc56f925012bede91ae51f # v2.41.7
         with:
           tool: nextest
 

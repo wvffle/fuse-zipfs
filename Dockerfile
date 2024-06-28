@@ -1,4 +1,4 @@
-FROM        alpine:3.20.1 AS builder
+FROM        alpine:3.20.1@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0 AS builder
 
 # renovate: datasource=repology depName=alpine_3_20/cargo versioning=loose
 ARG         CARGO_VERSION="1.78.0-r0"
@@ -17,7 +17,7 @@ RUN         apk add --no-cache \
             rm -rf /root/.cache /root/.cargo
 
 
-FROM        alpine:3.20.1
+FROM        alpine:3.20.1@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0
 
 # renovate: datasource=repology depName=alpine_3_20/gcc versioning=loose
 ARG         GCC_VERSION="13.2.1_git20240309-r0"
