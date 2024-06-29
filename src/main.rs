@@ -2,7 +2,8 @@ use std::num::NonZeroUsize;
 
 use clap::Parser;
 use color_eyre::Result;
-use fuse3::{path::Session, MountOptions};
+use fuse3::{path::Session, raw::MountHandle, MountOptions};
+use tokio::signal;
 use tracing::{debug, info};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use zipfs::ZipFs;
@@ -23,22 +24,57 @@ struct Args {
     mount_options: String,
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let args = Args::parse();
-
     let filter = EnvFilter::builder()
-        .with_default_directive("zipfs=info".parse()?)
+        .with_default_directive("zipfs=debug".parse()?)
         .from_env_lossy();
 
+    let layer = fmt::layer()
+        .pretty()
+        .with_target(true)
+        .with_writer(std::io::stderr);
+
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(layer)
         .with(filter)
         .init();
 
-    // let (tx, rx) = std::sync::mpsc::channel();
+    let mut mount_handle = mount().await?;
+    let handle = &mut mount_handle;
+
+    // BUG: handle does not finish when externally unmounted
+    // see upstream: https://github.com/Sherlock-Holo/fuse3/issues/102
+    tokio::select! {
+        res = handle => res?,
+        _ = signal::ctrl_c() => mount_handle.unmount().await?
+    }
+
+    info!("Successfully unmounted");
+
+    Ok(())
+}
+
+fn apply_options(options: String, mount_options: &mut MountOptions) {
+    mount_options
+        .fs_name("zipfs")
+        .read_only(true)
+        .force_readdir_plus(true);
+
+    for opt in options.split(',') {
+        match opt {
+            "default_permissions" => mount_options.default_permissions(true),
+            "allow_other" => mount_options.allow_other(true),
+            "allow_root" => mount_options.allow_root(true),
+            other => mount_options.custom_options(other),
+        };
+    }
+}
+
+async fn mount() -> Result<MountHandle> {
+    let args = Args::parse();
 
     info!("Mounting ZIP file system");
     info!("Data directory: {:?}", args.data_dir);
@@ -46,55 +82,11 @@ async fn main() -> Result<()> {
     info!("Cache size: {}", args.cache_size);
 
     let mut mount_options = MountOptions::default();
-    mount_options
-        .fs_name("zipfs")
-        .read_only(true)
-        .force_readdir_plus(true);
+    apply_options(args.mount_options, &mut mount_options);
 
-    Session::new(mount_options)
-        .mount(
-            // ZipFs::new(args.data_dir, args.cache_size, Some(tx.clone())),
-            ZipFs::new(args.data_dir, args.cache_size, None),
-            args.mount_point,
-        )
-        .await?
+    let handle = Session::new(mount_options)
+        .mount_with_unprivileged(ZipFs::new(args.data_dir, args.cache_size), args.mount_point)
         .await?;
 
-    // ctrlc::set_handler(move || {
-    //     debug!("Received signal to unmount");
-    //     tx.send(()).unwrap();
-    // })?;
-
-    // // NOTE: Drop the guard only after we have received a signal
-    // rx.recv()?;
-    // drop(guard);
-    info!("Successfully unmounted");
-
-    Ok(())
+    Ok(handle)
 }
-
-// fn get_options(mount_options: String) -> Vec<MountOption> {
-//     let mut options = vec![MountOption::RO, MountOption::FSName("zipfs".to_string())];
-//
-//     for opt in mount_options.split(',') {
-//         let opt = match opt {
-//             "default_permissions" => MountOption::DefaultPermissions,
-//             "allow_other" => MountOption::AllowOther,
-//             "allow_root" => MountOption::AllowRoot,
-//             "auto_unmount" => MountOption::AutoUnmount,
-//             "dev" => MountOption::Dev,
-//             "nodev" => MountOption::NoDev,
-//             "suid" => MountOption::Suid,
-//             "nosuid" => MountOption::NoSuid,
-//             "atime" => MountOption::Atime,
-//             "noatime" => MountOption::NoAtime,
-//             "exec" => MountOption::Exec,
-//             "noexec" => MountOption::NoExec,
-//             other => MountOption::CUSTOM(other.to_string()),
-//         };
-//
-//         options.push(opt);
-//     }
-//
-//     options
-// }

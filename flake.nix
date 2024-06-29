@@ -27,7 +27,6 @@
 
           packages = with pkgs; [
             cargo-nextest
-            fuse3
           ];
 
           enterShell = ''
