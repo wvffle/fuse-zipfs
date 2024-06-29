@@ -4,7 +4,7 @@ use clap::Parser;
 use color_eyre::Result;
 use fuse3::{path::Session, raw::MountHandle, MountOptions};
 use tokio::signal;
-use tracing::{debug, info};
+use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use zipfs::ZipFs;
 

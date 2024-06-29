@@ -1,17 +1,16 @@
-// TODO: LRU cache for the zip file handles
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    io::SeekFrom,
+    fs::File as StdFile,
+    io::{Read, SeekFrom},
     num::{NonZeroU32, NonZeroUsize},
     os::fd::{AsFd, AsRawFd},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
     vec::IntoIter,
 };
 
-use crate::file_tree::InnerFs;
 use crate::metadata::MetadataFileAttr;
 use bytes::Bytes;
 use fuse3::path::prelude::*;
@@ -26,6 +25,8 @@ use tokio::{
 use tokio_stream::{wrappers::ReadDirStream, Empty, Iter};
 use tracing::{debug, error};
 use zip::ZipArchive;
+
+type ZipFile = ZipArchive<Arc<StdFile>>;
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -58,9 +59,8 @@ impl OpenFile {
 
 pub struct ZipFs {
     data_dir: PathBuf,
-    open_zip_files: LruCache<u64, ZipArchive<Arc<File>>>,
+    open_zip_files: Arc<RwLock<LruCache<PathBuf, ZipFile>>>,
     open_files: Arc<RwLock<BTreeMap<u64, OpenFile>>>,
-    tree: InnerFs,
 }
 
 impl Drop for ZipFs {
@@ -73,135 +73,154 @@ impl ZipFs {
     pub fn new(data_dir: PathBuf, cache_size: NonZeroUsize) -> Self {
         Self {
             data_dir,
-            open_zip_files: LruCache::new(cache_size),
+            open_zip_files: Arc::new(RwLock::new(LruCache::new(cache_size))),
             open_files: Arc::new(RwLock::new(BTreeMap::new())),
-            // tree: FileTree::new(data_dir),
-            tree: InnerFs::default(),
         }
     }
 
-    fn get_data_path(&self, path: &OsStr) -> PathBuf {
-        let path = path.to_string_lossy();
+    fn get_data_path<P: AsRef<Path>>(&self, path: P) -> PathBuf {
+        let path = path.as_ref().to_string_lossy();
         let path = path.strip_prefix('/').unwrap_or(&path);
         self.data_dir.join(path)
     }
 
-    // fn get_zip_paths(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    //     let mut zip_index = None;
+    fn get_zip_paths<P: AsRef<Path>>(path: P) -> Option<(PathBuf, PathBuf)> {
+        let mut zip_index = None;
 
-    //     let components = path.components().rev().collect::<Vec<_>>();
-    //     for (index, component) in components.iter().enumerate() {
-    //         if let Some(extension) = component.as_os_str().to_str() {
-    //             if extension.ends_with(".zip") {
-    //                 zip_index = Some(index);
-    //                 break;
-    //             }
-    //         }
-    //     }
+        let components = path.as_ref().components().rev().collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            if let Some(extension) = component.as_os_str().to_str() {
+                if extension.ends_with(".zip") {
+                    zip_index = Some(index);
+                    break;
+                }
+            }
+        }
 
-    //     match zip_index {
-    //         Some(index) => {
-    //             let zip_path = components[index..].iter().rev().collect::<PathBuf>();
-    //             let file_path = components[..index].iter().rev().collect::<PathBuf>();
-    //             Some((zip_path, file_path))
-    //         }
-    //         None => None,
-    //     }
-    // }
+        match zip_index {
+            Some(index) => {
+                let zip_path = components[index..].iter().rev().collect::<PathBuf>();
+                let file_path = components[..index].iter().rev().collect::<PathBuf>();
+                Some((zip_path, file_path))
+            }
+            None => None,
+        }
+    }
 
-    // fn open_zip(&mut self, zip_path: &PathBuf) -> Result<Option<ZipArchive<Arc<File>>>> {
-    //     let Some(ino) = self.tree.find_inode_by_path(zip_path) else {
-    //         // NOTE: Maybe create the inode then?
-    //         error!("inode not found for zip = {:?}", zip_path);
-    //         return Err(Errno::new_not_exist());
-    //     };
+    async fn open_zip(&self, zip_path: &PathBuf) -> Result<Option<ZipFile>> {
+        // Get from cache
+        if let Some(archive) = self.open_zip_files.write().await.get(zip_path) {
+            return Ok(Some(archive.clone()));
+        }
 
-    //     // Get from cache
-    //     if let Some(archive) = self.open_zip_files.get(&ino) {
-    //         return Ok(Some(archive.clone()));
-    //     }
+        let file = StdFile::open(zip_path)?;
+        let archive = ZipArchive::new(Arc::new(file));
 
-    //     let file = fs::File::open(zip_path).map_err(map_io_error)?;
-    //     let archive = ZipArchive::new(Arc::new(file));
+        let archive = match archive {
+            Ok(archive) => archive,
+            Err(err) => {
+                error!("Error opening zip file: {:?}", err);
+                return Ok(None);
+            }
+        };
 
-    //     let archive = match archive {
-    //         Ok(archive) => archive,
-    //         Err(err) => {
-    //             error!("Error opening zip file: {:?}", err);
-    //             return Ok(None);
-    //         }
-    //     };
+        self.open_zip_files
+            .write()
+            .await
+            .put(zip_path.to_path_buf(), archive.clone());
 
-    //     self.open_zip_files.put(ino, archive.clone());
-    //     Ok(Some(archive))
-    // }
+        Ok(Some(archive))
+    }
 
-    // fn readdir_zip(
-    //     &mut self,
-    //     ino: Inode,
-    //     offset: i64,
-    //     zip_path: &Path,
-    //     file_path: &Path,
-    //     reply: &mut ReplyDirectory,
-    // ) -> Result<()> {
-    //     debug!("zip_path = {:?}, file_path = {:?}", zip_path, file_path);
-    //     if offset != 0 {
-    //         return Ok(());
-    //     }
+    async fn readdir_zip<'a>(
+        &self,
+        offset: u64,
+        zip_path: &Path,
+        file_path: &Path,
+    ) -> Result<ReplyDirectoryPlus<<Self as PathFilesystem>::DirEntryPlusStream<'a>>> {
+        debug!(
+            "readdir_zip: zip_path = {:?}, file_path = {:?}",
+            zip_path, file_path
+        );
 
-    //     let Some(mut archive) = self.open_zip(&zip_path.to_path_buf())? else {
-    //         return Ok(());
-    //     };
+        if offset != 0 {
+            return Ok(ReplyDirectoryPlus {
+                entries: tokio_stream::iter(vec![]),
+            });
+        }
 
-    //     let file_string = file_path.to_string_lossy().to_string() + "/";
-    //     let file_string = file_string.strip_prefix('/').unwrap_or(&file_string);
-    //     let slash_count = file_string.chars().filter(|c| *c == '/').count();
+        let Some(archive) = self.open_zip(&zip_path.to_path_buf()).await? else {
+            // NOTE: This archive is corrupt, let's just say it does not contain any entries
+            return Ok(ReplyDirectoryPlus {
+                entries: tokio_stream::iter(vec![]),
+            });
+        };
 
-    //     let cloned_archive = archive.clone();
-    //     let mut file_names = cloned_archive
-    //         .file_names()
-    //         .filter(|name| name.starts_with(file_string))
-    //         .filter_map(|name| name.split('/').nth(slash_count))
-    //         .collect::<Vec<_>>();
+        let file_string = file_path.to_string_lossy().to_string() + "/";
+        let file_string = file_string.strip_prefix('/').unwrap_or(&file_string);
+        let slash_count = file_string.chars().filter(|c| *c == '/').count();
 
-    //     file_names.dedup();
-    //     file_names.sort_by_key(|name| name.len());
+        let cloned_archive = archive.clone();
+        let mut file_names = cloned_archive
+            .file_names()
+            .filter(|name| name.starts_with(file_string))
+            .filter_map(|name| name.split('/').nth(slash_count))
+            .collect::<Vec<_>>();
 
-    //     debug!("slash_count = {}", slash_count);
-    //     debug!("file_string = {:?}", file_string);
-    //     debug!("file_names = {:?}", file_names);
+        file_names.dedup();
+        file_names.sort_by_key(|name| name.len());
 
-    //     for (i, name) in file_names.iter().enumerate() {
-    //         let Ok(entry) = archive.by_name(name) else {
-    //             if reply.add(ino, offset + i as i64 + 1, FileType::Directory, name) {
-    //                 break;
-    //             }
+        debug!(
+            "readdir_zip: slash_count = {}, file_string = {:?}, file_names = {:?}",
+            slash_count, file_string, file_names
+        );
 
-    //             continue;
-    //         };
+        let file_attr = tokio::fs::metadata(zip_path).await?.to_file_attr();
+        let mut dir_attr = file_attr;
+        dir_attr.kind = FileType::Directory;
+        dir_attr.perm = 0o555;
 
-    //         let Some(file_name) = entry.enclosed_name() else {
-    //             error!("file name invalid = {:?}", name);
-    //             continue;
-    //         };
+        debug!(
+            "readdir_zip: archive files: {:?}",
+            archive.file_names().collect::<Vec<_>>()
+        );
 
-    //         debug!("file_name = {:?}", file_name);
-    //         let ino = self.get_or_create_inode(zip_path.join(&file_name));
+        let dir = PathBuf::from(file_string);
+        let entries = tokio_stream::iter(&file_names)
+            .enumerate()
+            .skip(offset as usize)
+            .map({
+                |(i, name)| {
+                    debug!("readdir_zip: name = {:?}", name);
 
-    //         debug!("offset = {}", offset,);
+                    let is_file = archive
+                        .clone()
+                        .by_name(&dir.join(name).to_string_lossy())
+                        .map(|entry| entry.is_file())
+                        .unwrap_or(false);
 
-    //         if reply.add(
-    //             ino,
-    //             offset + i as i64 + 1,
-    //             FileType::RegularFile,
-    //             &file_name,
-    //         ) {
-    //             break;
-    //         }
-    //     }
+                    let attr = match is_file {
+                        true => file_attr,
+                        false => dir_attr,
+                    };
 
-    //     Ok(())
-    // }
+                    Ok(DirectoryEntryPlus {
+                        kind: attr.kind,
+                        name: name.into(),
+                        offset: offset as i64 + i as i64 + 1,
+                        attr,
+                        entry_ttl: TTL,
+                        attr_ttl: TTL,
+                    })
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
+
+        Ok(ReplyDirectoryPlus {
+            entries: tokio_stream::iter(entries),
+        })
+    }
 }
 
 impl PathFilesystem for ZipFs {
@@ -214,7 +233,7 @@ impl PathFilesystem for ZipFs {
         })
     }
 
-    async fn destroy(&self, _req: Request) -> () {}
+    async fn destroy(&self, _req: Request) {}
 
     async fn getattr(
         &self,
@@ -227,35 +246,30 @@ impl PathFilesystem for ZipFs {
         let path = self.get_data_path(path.ok_or_else(Errno::new_not_exist)?);
         debug!("getattr: data_path={:?}", path);
 
-        // if let Some((ref zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
-        //     let metadata = fs::metadata(zip_path).map_err(map_io_error)?;
-        //     let mut attrs = metadata_to_file_attrs(metadata)?;
-        //     // attrs.ino = ino;
+        if let Some((ref zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
+            let mut attr = tokio::fs::metadata(zip_path).await?.to_file_attr();
 
-        //     let Some(archive) = self.open_zip(zip_path)? else {
-        //         attrs.kind = FileType::Directory;
-        //         attrs.perm = 0o555;
-        //         return Ok(attrs);
-        //     };
+            let Some(archive) = self.open_zip(zip_path).await? else {
+                // NOTE: This archive is corrupt, let's just say it does not contain any entries
+                attr.kind = FileType::Directory;
+                attr.perm = 0o555;
+                return Ok(ReplyAttr { ttl: TTL, attr });
+            };
 
-        //     let is_dir = archive
-        //         .clone()
-        //         .by_name(file_path.to_string_lossy().as_ref())
-        //         .map(|entry| entry.is_dir())
-        //         .unwrap_or(true);
+            let is_dir = archive
+                .clone()
+                .by_name(file_path.to_string_lossy().as_ref())
+                .map(|entry| entry.is_dir())
+                // In case path does not exist in zip file, let's assume it's a directory
+                .unwrap_or(true);
 
-        //     if is_dir {
-        //         attrs.kind = FileType::Directory;
-        //         attrs.perm = 0o555;
-        //     } else {
-        //         attrs.kind = FileType::RegularFile;
-        //         attrs.perm = 0o444;
-        //     }
+            if is_dir {
+                attr.kind = FileType::Directory;
+                attr.perm = 0o555;
+            }
 
-        //     return Ok(attrs);
-        // }
-        //
-        //
+            return Ok(ReplyAttr { ttl: TTL, attr });
+        }
 
         let metadata = tokio::fs::metadata(path).await?;
         let attr = metadata.to_file_attr();
@@ -263,15 +277,10 @@ impl PathFilesystem for ZipFs {
         Ok(ReplyAttr { ttl: TTL, attr })
     }
 
-    async fn lookup(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<ReplyEntry> {
-        debug!("lookup: parent={:?}, name={:?}", parent, name);
-
-        let path = self.get_data_path(parent);
-        let path = path.join(name);
-
-        let metadata = tokio::fs::metadata(&path).await?;
-        let attr = metadata.to_file_attr();
-
+    async fn lookup(&self, req: Request, parent: &OsStr, name: &OsStr) -> Result<ReplyEntry> {
+        let path = PathBuf::from(parent).join(name);
+        let path = path.to_str().map(|x| x.as_ref());
+        let attr = self.getattr(req, path, None, 0).await?.attr;
         Ok(ReplyEntry { ttl: TTL, attr })
     }
 
@@ -284,8 +293,15 @@ impl PathFilesystem for ZipFs {
     ) -> Result<ReplyOpen> {
         debug!("open: path={:?}", path);
 
+        if ZipFs::get_zip_paths(path).is_some() {
+            return Ok(ReplyOpen {
+                fh: 0,
+                flags: libc::O_RDONLY as u32,
+            });
+        }
+
         let file = File::open(self.get_data_path(path)).await?;
-        let fh = file.as_fd().as_raw_fd() as u64;
+        let fh = 1 + file.as_fd().as_raw_fd() as u64;
         debug!("open: fh={}", fh);
         self.open_files
             .write()
@@ -325,24 +341,28 @@ impl PathFilesystem for ZipFs {
     ) -> Result<ReplyData> {
         debug!("read: path={:?}, offset={}, size={}", path, offset, size);
 
-        // let path = self.get_data_path(path.ok_or_else(Errno::new_not_exist)?);
+        if fh == 0 {
+            let path = self.get_data_path(path.ok_or_else(Errno::new_not_exist)?);
 
-        // if let Some((zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
-        //     if let Some(mut archive) = self.open_zip(&zip_path.to_path_buf())? {
-        //         let entry = archive
-        //             .by_name(file_path.to_string_lossy().as_ref())
-        //             .map_err(map_io_error)?;
+            if let Some((zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
+                if let Some(mut archive) = self.open_zip(&zip_path.to_path_buf()).await? {
+                    let entry = archive
+                        .by_name(file_path.to_string_lossy().as_ref())
+                        .map_err(|_| Errno::new_not_exist())?;
 
-        //         let data = entry
-        //             .bytes()
-        //             .skip(offset as usize)
-        //             .take(size as usize)
-        //             .collect::<std::result::Result<Vec<u8>, _>>()
-        //             .map_err(map_io_error)?;
+                    let data = entry
+                        .bytes()
+                        .skip(offset as usize)
+                        .take(size as usize)
+                        .collect::<std::result::Result<Bytes, _>>()?;
 
-        //         return Ok(data);
-        //     }
-        // }
+                    return Ok(ReplyData { data });
+                }
+
+                error!("Error opening zip file");
+                return Err(Errno::new_not_exist());
+            }
+        }
 
         let mut files = self.open_files.write().await;
         let Some(file) = files.get_mut(&fh) else {
@@ -368,9 +388,13 @@ impl PathFilesystem for ZipFs {
 
         let path = self.get_data_path(parent);
 
-        //     if let Some((zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
-        //         return self.readdir_zip(ino, offset, &zip_path, &file_path, reply);
-        //     }
+        if let Some((zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
+            debug!(
+                "readdirplus: zip_path={:?}, file_path={:?}",
+                zip_path, file_path
+            );
+            return self.readdir_zip(offset, &zip_path, &file_path).await;
+        }
 
         let metadata = tokio::fs::metadata(&path).await?;
         if !metadata.is_dir() {
@@ -379,10 +403,17 @@ impl PathFilesystem for ZipFs {
 
         let entries = ReadDirStream::new(tokio::fs::read_dir(&path).await?)
             .enumerate()
+            .skip(offset as usize)
             .then(|(i, entry)| async move {
                 let entry = entry?;
                 let metadata = entry.metadata().await?;
-                let attr = metadata.to_file_attr();
+                let mut attr = metadata.to_file_attr();
+
+                if entry.file_name().to_string_lossy().ends_with(".zip") {
+                    attr.kind = FileType::Directory;
+                    attr.perm = 0o555;
+                }
+
                 Ok(DirectoryEntryPlus {
                     kind: attr.kind,
                     name: entry.file_name(),
@@ -392,7 +423,6 @@ impl PathFilesystem for ZipFs {
                     attr_ttl: TTL,
                 })
             })
-            .skip(offset as usize)
             .collect::<Vec<_>>()
             .await;
 
