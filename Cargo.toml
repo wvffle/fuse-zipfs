@@ -16,7 +16,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 zip = "2.1.6"
 
 [dev-dependencies]
-temp-dir = "0.1.13"
+temp-dir = "=0.1.13"
 
 [profile.release]
 lto = true

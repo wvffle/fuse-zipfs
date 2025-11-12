@@ -6,7 +6,7 @@
 services:
   zipfs:
     # build: .
-    image: ghcr.io/wvffle/fuse-zipfs
+    image: ghcr.io/wvffle/fuse-zipfs@sha256:cdc45a97161d7c71eeea68a4e9e43a12110ab106a708aa7fede78b6e49c8ffb7
     privileged: true
     volumes:
       - # Data/source directory
