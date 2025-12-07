@@ -14,7 +14,7 @@ use std::{
     sync::mpsc::Sender,
     time::{Duration, UNIX_EPOCH},
 };
-use sync_file::{ReadAt, Size, SyncFile};
+use sync_file::SyncFile;
 use tracing::{debug, error};
 use zip::{CompressionMethod, ZipArchive};
 
