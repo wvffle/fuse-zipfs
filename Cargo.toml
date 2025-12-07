@@ -1,6 +1,6 @@
 [package]
 name = "zipfs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -8,12 +8,15 @@ bimap = "0.6.3"
 clap = { version = "4.5.16", features = ["derive"] }
 color-eyre = "0.6.3"
 ctrlc = "3.4.5"
-fuser = "0.14.0"
+fuser = "0.16.0"
 libc = "0.2.157"
-lru = "0.12.4"
+lru = "0.16.2"
+rstest = "0.26.1"
+sync_file = "0.3.2"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-zip = "2.1.6"
+zip = "6.0.0"
+zip-extensions = "0.11.0"
 
 [dev-dependencies]
 temp-dir = "0.1.13"

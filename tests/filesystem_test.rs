@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 use color_eyre::Result;
 use fuser::BackgroundSession;
+use rstest::rstest;
 use temp_dir::TempDir;
 use zipfs::ZipFs;
 
@@ -66,74 +67,72 @@ fn test_read_passthrough() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_readdir_zip() -> Result<()> {
+#[rstest]
+#[case::stored("stored.zip")]
+#[case::compressed("compressed.zip")]
+#[case::encrypted("encrypted.zip")]
+fn test_readdir_zip(#[case] zip: &str) -> Result<()> {
     let (mnt, guard) = mount()?;
 
-    for zip in ["stored.zip", "compressed.zip", "encrypted.zip"] {
-        let entries: Vec<_> = fs::read_dir(mnt.path().join(zip))?
-            .map(|e| e.unwrap())
-            .collect();
+    let entries: Vec<_> = fs::read_dir(mnt.path().join(zip))?
+        .map(|e| e.unwrap())
+        .collect();
 
-        let names = entries
-            .into_iter()
-            .map(|entry| entry.file_name())
-            .collect::<Vec<_>>();
+    let names = entries
+        .into_iter()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["some"]);
-    }
+    assert_eq!(names, vec!["some"]);
 
-    for zip in ["stored.zip", "compressed.zip", "encrypted.zip"] {
-        let entries: Vec<_> = fs::read_dir(mnt.path().join(zip).join("some"))?
-            .map(|e| e.unwrap())
-            .collect();
+    let entries: Vec<_> = fs::read_dir(mnt.path().join(zip).join("some"))?
+        .map(|e| e.unwrap())
+        .collect();
 
-        let names = entries
-            .into_iter()
-            .map(|entry| entry.file_name())
-            .collect::<Vec<_>>();
+    let names = entries
+        .into_iter()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["nested"]);
-    }
+    assert_eq!(names, vec!["nested"]);
 
-    for zip in ["stored.zip", "compressed.zip", "encrypted.zip"] {
-        let entries: Vec<_> = fs::read_dir(mnt.path().join(zip).join("some/nested"))?
-            .map(|e| e.unwrap())
-            .collect();
+    let entries: Vec<_> = fs::read_dir(mnt.path().join(zip).join("some/nested"))?
+        .map(|e| e.unwrap())
+        .collect();
 
-        let names = entries
-            .into_iter()
-            .map(|entry| entry.file_name())
-            .collect::<Vec<_>>();
+    let names = entries
+        .into_iter()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["file.txt"]);
-    }
+    assert_eq!(names, vec!["file.txt"]);
 
     drop(guard);
     Ok(())
 }
 
-#[test]
-fn test_read_zip() -> Result<()> {
+#[rstest]
+#[case::stored("stored.zip")]
+#[case::compressed("compressed.zip")]
+fn test_read_zip(#[case] zip: &str) -> Result<()> {
     let (mnt, guard) = mount()?;
 
-    for zip in ["stored.zip", "compressed.zip"] {
-        let content = fs::read_to_string(mnt.path().join(zip).join("some/nested/file.txt"))?;
-        assert_eq!(content, "some content\n".to_string().repeat(15));
-    }
+    let content = fs::read_to_string(mnt.path().join(zip).join("some/nested/file.txt"))?;
+    assert_eq!(content, "some content\n".to_string().repeat(15));
 
     drop(guard);
     Ok(())
 }
 
-#[test]
-fn test_encrypted_zip_mounts_dirs() -> Result<()> {
+#[rstest]
+#[case::stored("stored.zip")]
+#[case::compressed("compressed.zip")]
+#[case::encrypted("encrypted.zip")]
+fn test_encrypted_zip_mounts_dirs(#[case] zip: &str) -> Result<()> {
     let (mnt, guard) = mount()?;
 
-    for zip in ["stored.zip", "compressed.zip", "encrypted.zip"] {
-        let meta = fs::metadata(mnt.path().join(zip).join("some/nested/file.txt"))?;
-        assert_eq!(meta.is_dir(), zip == "encrypted.zip");
-    }
+    let meta = fs::metadata(mnt.path().join(zip).join("some/nested/file.txt"))?;
+    assert_eq!(meta.is_dir(), zip == "encrypted.zip");
 
     drop(guard);
     Ok(())

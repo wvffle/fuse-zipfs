@@ -1,25 +1,27 @@
 // TODO: LRU cache for the zip file handles
+use crate::file_tree::FileTree;
+use color_eyre::eyre::Result;
+
+use fuser::{FileAttr, FileType, Filesystem};
+use libc::{ENOENT, ENOSYS};
+use lru::LruCache;
 use std::{
-    fs::{self, File},
-    io::Read,
+    fs,
+    io::{Read, Seek},
     num::NonZeroUsize,
     os::{linux::fs::MetadataExt, unix::fs::PermissionsExt},
     path::{Path, PathBuf},
-    sync::{mpsc::Sender, Arc},
+    sync::mpsc::Sender,
     time::{Duration, UNIX_EPOCH},
 };
+use sync_file::{ReadAt, Size, SyncFile};
+use tracing::{debug, error};
+use zip::{CompressionMethod, ZipArchive};
 
 type FuseError = libc::c_int;
 type INode = u64;
 type FileHandle = u64;
-
-use crate::file_tree::FileTree;
-use color_eyre::eyre::Result;
-use fuser::{FileAttr, FileType, Filesystem};
-use libc::{ENOENT, ENOSYS};
-use lru::LruCache;
-use tracing::{debug, error};
-use zip::ZipArchive;
+type Archive = ZipArchive<SyncFile>;
 
 // TODO: Understand what it is
 const TTL: Duration = Duration::from_secs(1);
@@ -56,13 +58,13 @@ fn metadata_to_file_attrs(metadata: fs::Metadata) -> Result<FileAttr, FuseError>
         gid: metadata.st_gid(),
         rdev: metadata.st_rdev() as u32,
         blksize: metadata.st_blksize() as u32,
-        flags: 0, // NOTE: macos only
+        flags: 0, // NOTE: macOS only
     })
 }
 
 pub struct ZipFs {
     umount: Option<Sender<()>>,
-    open_files: LruCache<FileHandle, ZipArchive<Arc<File>>>,
+    open_files: LruCache<FileHandle, Archive>,
     tree: FileTree,
 }
 
@@ -160,7 +162,7 @@ impl ZipFs {
         }
     }
 
-    fn open_zip(&mut self, zip_path: &PathBuf) -> Result<Option<ZipArchive<Arc<File>>>, FuseError> {
+    fn open_zip(&mut self, zip_path: &PathBuf) -> Result<Option<Archive>, FuseError> {
         let Some(ino) = self.tree.find_inode_by_path(zip_path) else {
             // NOTE: Maybe create the inode then?
             error!("inode not found for zip = {:?}", zip_path);
@@ -172,8 +174,8 @@ impl ZipFs {
             return Ok(Some(archive.clone()));
         }
 
-        let file = fs::File::open(zip_path).map_err(map_io_error)?;
-        let archive = ZipArchive::new(Arc::new(file));
+        let file = SyncFile::open(zip_path).map_err(map_io_error)?;
+        let archive = ZipArchive::new(file);
 
         let archive = match archive {
             Ok(archive) => archive,
@@ -282,7 +284,7 @@ impl ZipFs {
 
             let file_path = path.join(&file_name);
 
-            // TODO: If extension is .zip, say it's a directory
+            // TODO: If extension is a '.zip', say it's a directory
 
             let ino = self.get_or_create_inode(file_path);
             if reply.add(ino, offset + i as i64 + 1, file_type, file_name) {
@@ -315,18 +317,48 @@ impl ZipFs {
 
         if let Some((zip_path, file_path)) = ZipFs::get_zip_paths(&path) {
             if let Some(mut archive) = self.open_zip(&zip_path.to_path_buf())? {
+                let mut file = archive.clone().into_inner();
+
                 let entry = archive
                     .by_name(file_path.to_string_lossy().as_ref())
                     .map_err(map_io_error)?;
 
-                let data = entry
-                    .bytes()
-                    .skip(offset as usize)
-                    .take(size as usize)
-                    .collect::<std::result::Result<Vec<u8>, _>>()
-                    .map_err(map_io_error)?;
+                assert!(offset >= 0);
+                let offset = offset as u64;
+                let size: usize = std::cmp::min(
+                    size as usize,
+                    (entry.size() as usize).saturating_sub(offset as usize),
+                );
 
-                return Ok(data);
+                return match entry.compression() {
+                    CompressionMethod::Stored => {
+                        let mut buf = vec![0; size];
+
+                        file.seek(std::io::SeekFrom::Start(offset + entry.data_start()))
+                            .map_err(map_io_error)?;
+
+                        file.read_exact(&mut buf).map_err(map_io_error)?;
+                        Ok(buf)
+                    }
+
+                    _ => {
+                        // FIXME: reader.seek does not work here, let's read entire file for now :/
+                        // let mut reader = BufReader::with_capacity(size as usize, &mut entry);
+                        // reader.seek(offset as usize);
+                        // let mut buf = Vec::<u8>::with_capacity(size as usize);
+                        // reader.read_exact(&mut buf).map_err(map_io_error)?;
+                        // Ok(buf)
+
+                        let data = entry
+                            .bytes()
+                            .skip(offset as usize)
+                            .take(size)
+                            .collect::<std::result::Result<Vec<u8>, _>>()
+                            .map_err(map_io_error)?;
+
+                        Ok(data)
+                    }
+                };
             }
         }
 
@@ -342,8 +374,14 @@ impl ZipFs {
 }
 
 impl Filesystem for ZipFs {
-    fn getattr(&mut self, _req: &fuser::Request<'_>, ino: INode, reply: fuser::ReplyAttr) {
-        debug!("getattr: ino={}", ino);
+    fn getattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: INode,
+        fh: Option<u64>,
+        reply: fuser::ReplyAttr,
+    ) {
+        debug!("getattr: ino={}, fh={:?}", ino, fh);
 
         match self.getattr_(ino) {
             Ok(attrs) => reply.attr(&TTL, &attrs),
