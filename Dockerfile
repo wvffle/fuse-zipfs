@@ -24,7 +24,7 @@ RUN         --mount=type=cache,sharing=locked,target=/root/.cargo,id=home-cargo-
 FROM        alpine:3.20.1@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0
 
 # renovate: datasource=repology depName=alpine_3_20/gcc versioning=loose
-ARG         GCC_VERSION="13.2.1_git20240309-r0"
+ARG         GCC_VERSION="13.2.1_git20240309-r1"
 # renovate: datasource=repology depName=alpine_3_20/fuse3 versioning=loose
 ARG         FUSE3_VERSION="3.16.2-r0"
 
