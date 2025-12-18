@@ -1,4 +1,4 @@
-FROM        alpine:3.20.1@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0 AS builder
+FROM        alpine:3.23.2@sha256:865b95f46d98cf867a156fe4a135ad3fe50d2056aa3f25ed31662dff6da4eb62 AS builder
 
 # renovate: datasource=repology depName=alpine_3_20/cargo versioning=loose
 ARG         CARGO_VERSION="1.78.0-r0"
@@ -21,7 +21,7 @@ RUN         --mount=type=cache,sharing=locked,target=/root/.cargo,id=home-cargo-
             cp /root/.cargo/target/release/zipfs .
 
 
-FROM        alpine:3.20.1@sha256:b89d9c93e9ed3597455c90a0b88a8bbb5cb7188438f70953fede212a0c4394e0
+FROM        alpine:3.23.2@sha256:865b95f46d98cf867a156fe4a135ad3fe50d2056aa3f25ed31662dff6da4eb62
 
 # renovate: datasource=repology depName=alpine_3_20/gcc versioning=loose
 ARG         GCC_VERSION="13.2.1_git20240309-r0"
