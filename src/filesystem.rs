@@ -1,14 +1,11 @@
-// TODO: LRU cache for the zip file handles
 use crate::file_tree::FileTree;
 use color_eyre::eyre::Result;
 
 use fuser::{FileAttr, FileType, Filesystem};
 use libc::{ENOENT, ENOSYS};
-use lru::LruCache;
 use std::{
     fs,
     io::{Read, Seek},
-    num::NonZeroUsize,
     os::{linux::fs::MetadataExt, unix::fs::PermissionsExt},
     path::{Path, PathBuf},
     sync::mpsc::Sender,
@@ -16,7 +13,8 @@ use std::{
 };
 use sync_file::SyncFile;
 use tracing::{debug, error};
-use zip::{CompressionMethod, ZipArchive};
+use zip::CompressionMethod;
+use zip::ZipArchive;
 
 type FuseError = libc::c_int;
 type INode = u64;
@@ -64,7 +62,6 @@ fn metadata_to_file_attrs(metadata: fs::Metadata) -> Result<FileAttr, FuseError>
 
 pub struct ZipFs {
     umount: Option<Sender<()>>,
-    open_files: LruCache<FileHandle, Archive>,
     tree: FileTree,
 }
 
@@ -79,10 +76,9 @@ impl Drop for ZipFs {
 }
 
 impl ZipFs {
-    pub fn new(data_dir: PathBuf, cache_size: NonZeroUsize, umount: Option<Sender<()>>) -> Self {
+    pub fn new(data_dir: PathBuf, umount: Option<Sender<()>>) -> Self {
         Self {
             umount,
-            open_files: LruCache::new(cache_size),
             tree: FileTree::new(data_dir),
         }
     }
@@ -133,24 +129,30 @@ impl ZipFs {
             let mut attrs = metadata_to_file_attrs(metadata)?;
             attrs.ino = ino;
 
-            let Some(archive) = self.open_zip(zip_path)? else {
+            let Some(mut archive) = self.open_zip(zip_path)? else {
                 attrs.kind = FileType::Directory;
                 attrs.perm = 0o555;
                 return Ok(attrs);
             };
 
-            let is_dir = archive
-                .clone()
-                .by_name(file_path.to_string_lossy().as_ref())
-                .map(|entry| entry.is_dir())
-                .unwrap_or(true);
+            let zip_result = archive.by_name(file_path.to_string_lossy().as_ref());
+            let entry = match zip_result {
+                Ok(e) => e,
+                Err(_) => {
+                    attrs.kind = FileType::Directory;
+                    attrs.perm = 0o555;
+                    return Ok(attrs);
+                }
+            };
 
-            if is_dir {
+            if entry.is_dir() {
                 attrs.kind = FileType::Directory;
                 attrs.perm = 0o555;
+                attrs.size = 0;
             } else {
                 attrs.kind = FileType::RegularFile;
                 attrs.perm = 0o444;
+                attrs.size = entry.size();
             }
 
             Ok(attrs)
@@ -163,17 +165,6 @@ impl ZipFs {
     }
 
     fn open_zip(&mut self, zip_path: &PathBuf) -> Result<Option<Archive>, FuseError> {
-        let Some(ino) = self.tree.find_inode_by_path(zip_path) else {
-            // NOTE: Maybe create the inode then?
-            error!("inode not found for zip = {:?}", zip_path);
-            return Err(ENOENT);
-        };
-
-        // Get from cache
-        if let Some(archive) = self.open_files.get(&ino) {
-            return Ok(Some(archive.clone()));
-        }
-
         let file = SyncFile::open(zip_path).map_err(map_io_error)?;
         let archive = ZipArchive::new(file);
 
@@ -185,7 +176,6 @@ impl ZipFs {
             }
         };
 
-        self.open_files.put(ino, archive.clone());
         Ok(Some(archive))
     }
 
@@ -349,6 +339,7 @@ impl ZipFs {
                         // reader.read_exact(&mut buf).map_err(map_io_error)?;
                         // Ok(buf)
 
+                        #[allow(clippy::unbuffered_bytes)]
                         let data = entry
                             .bytes()
                             .skip(offset as usize)

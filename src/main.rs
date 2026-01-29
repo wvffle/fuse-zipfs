@@ -1,5 +1,3 @@
-use std::num::NonZeroUsize;
-
 use clap::Parser;
 use color_eyre::Result;
 use fuser::MountOption;
@@ -15,9 +13,6 @@ struct Args {
 
     #[arg(index = 2)]
     mount_point: std::path::PathBuf,
-
-    #[arg(short, long, default_value_t = NonZeroUsize::new(1024).unwrap())]
-    cache_size: NonZeroUsize,
 
     #[arg(short = 'o', long, default_value_t = String::from("ro"))]
     mount_options: String,
@@ -42,9 +37,8 @@ fn main() -> Result<()> {
     info!("Mounting ZIP file system");
     info!("Data directory: {:?}", args.data_dir);
     info!("Mount point: {:?}", args.mount_point);
-    info!("Cache size: {}", args.cache_size);
     let guard = fuser::spawn_mount2(
-        ZipFs::new(args.data_dir, args.cache_size, Some(tx.clone())),
+        ZipFs::new(args.data_dir, Some(tx.clone())),
         args.mount_point,
         &get_options(args.mount_options),
     )?;

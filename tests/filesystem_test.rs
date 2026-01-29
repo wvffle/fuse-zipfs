@@ -12,7 +12,7 @@ fn mount() -> Result<(TempDir, BackgroundSession)> {
     let mnt = TempDir::new()?;
 
     let guard = fuser::spawn_mount2(
-        ZipFs::new(PathBuf::from(DATA_DIR), 1024.try_into()?, None),
+        ZipFs::new(PathBuf::from(DATA_DIR), None),
         mnt.path(),
         &[fuser::MountOption::RO],
     )?;
